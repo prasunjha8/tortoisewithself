@@ -42,7 +42,7 @@ Both Pis need to be on the **same Wi-Fi network** for DDS discovery to work acro
 - Confirm the lab network doesn't block multicast/UDP traffic between devices (some enterprise/lab Wi-Fi setups isolate clients from each other — worth testing with `ros2 topic list` from one Pi while a node runs on the other)
 - If using Docker on the Pi 5, `--net=host` (already in the run command below) is what lets ROS 2 nodes inside the container see the Pi 4 on the network
 
-> Not yet confirmed: whether the lab Wi-Fi allows this kind of inter-device discovery. Worth testing early rather than after everything else is wired up.
+> ⚠️ Not yet confirmed: whether the lab Wi-Fi allows this kind of inter-device discovery. Worth testing early rather than after everything else is wired up.
 
 ## Pre-lab simulation (Pi 5, Docker)
 
@@ -50,7 +50,7 @@ Since the Tortoise itself lives in the lab, mapping/nav software gets tested fir
 
 ### 1. Dockerfile
 
-> **ARM64 note:** `osrf/ros:jazzy-desktop` is AMD64-only and fails on the Pi 5 with `expected "linux/arm64" for current build` / `exec format error`. Use the plain `ros:jazzy` base (ARM-compatible) and install the desktop tools manually instead.
+> ⚠️ **ARM64 note:** `osrf/ros:jazzy-desktop` is AMD64-only and fails on the Pi 5 with `expected "linux/arm64" for current build` / `exec format error`. Use the plain `ros:jazzy` base (ARM-compatible) and install the desktop tools manually instead.
 
 ```bash
 cat << 'EOF' > Dockerfile
@@ -116,10 +116,10 @@ xacro src/tortoisewithself/urdf/tortoisebot_sim.xacro
 
 A large block of XML with no errors means the URDF structure is valid.
 
-**Build**, skipping physical-hardware-only packages not needed for simulation (LiDAR/camera drivers):
+**Build**, skipping physical-hardware-only packages not needed for simulation (LiDAR/camera drivers), **with `--symlink-install`** so future edits to launch files take effect without a full rebuild:
 
 ```bash
-colcon build --packages-skip ydlidar_ros2_driver v4l2_camera
+colcon build --symlink-install --packages-skip ydlidar_ros2_driver v4l2_camera
 ```
 
 > If missing-dependency errors come up for other packages, install them directly (`apt install -y ros-jazzy-camera-info-manager`, `ros-jazzy-image-transport`, etc.) and just re-run `colcon build` — it resumes from where it failed. Or use `rosdep` to install everything a workspace needs at once:
@@ -132,10 +132,12 @@ colcon build --packages-skip ydlidar_ros2_driver v4l2_camera
 
 ```bash
 source install/setup.bash
-ros2 launch tortoisebot_gazebo tortoisebot_empty_world.launch.py
+ros2 launch tortoisebot_gazebo ignition_sim.launch.py
 ```
 
-If the launch file name is wrong, list what's actually available:
+Spawns the robot into `nav2_test_world.sdf` (bundled with the package, not a custom RigBetel world). Confirmed working: Gazebo renders, robot spawns, all sensor bridges (camera, ydlidar, odom, tf) connect.
+
+If a launch file name is ever wrong, list what's actually available:
 ```bash
 ls src/tortoisebot/tortoisebot_gazebo/launch/
 ```
@@ -161,23 +163,40 @@ Drive with `u i o / j k l / m , .` (standard `teleop_twist_keyboard` keymap).
 
 ## GUI troubleshooting
 
-If Gazebo/RViz windows fail to open from inside the container, it's almost always the X11 forwarding:
+You're accessing the Pi 5 desktop remotely via **Raspberry Pi Connect** (browser-based screen sharing), not a local monitor.
 
-- **`cannot connect to X server` / blank window** — re-run `xhost +local:root` on the Pi 5 host (not inside the container) before `docker run`
-- **Connecting to the Pi 5 over SSH** — plain SSH won't forward a Wayland/X session by itself; you need either a monitor physically on the Pi 5, or SSH with `-X`/`-Y` (X11 forwarding) into the Pi 5 first, or a VNC session into the Pi 5 desktop
-- **`$DISPLAY` is empty inside the container** — check `echo $DISPLAY` on the Pi 5 host first; if that's empty, the host itself has no display session to forward
-- **Still nothing** — confirm the Pi 5 is running the **64-bit Raspberry Pi OS desktop image** (Gazebo/RViz need a real desktop environment, not Lite)
+If Gazebo/RViz windows fail to open from inside the container:
 
->  Not yet confirmed: whether you're driving the Pi 5 with a monitor attached or remotely — worth deciding this before the Docker run, since it changes the `-e DISPLAY` setup.
+- **`cannot connect to X server` / `qt.qpa.xcb: could not connect to display`** — re-run `xhost +local:root` **on the Pi 5 host itself** (open a fresh terminal from the Pi's desktop, not `docker exec` into the running container). This grant does **not** persist across a Raspberry Pi Connect session reset — if the browser tab reconnects, re-run it before launching Gazebo again. Confirm the command actually took by checking for the output `non-network local connections being added to access control list`.
+- **`$DISPLAY` mismatch** — run `echo $DISPLAY` on the host *and* inside the container; they need to match (usually `:0`). If they don't, the container needs restarting with a fresh `-e DISPLAY=$DISPLAY` pulled from the host at that moment.
+- **Watch for stray characters when typing `xhost +local:root` or any `grep`/quoted command** — a trailing backtick or unclosed quote leaves bash hanging at a `>` continuation prompt instead of erroring, which looks like nothing happened. Ctrl+C and retype carefully.
+
+### GPU rendering (expected, not a bug)
+
+Gazebo on the Pi 5 logs `MESA-LOADER: failed to retrieve device information` / `glx: failed to create dri3 screen` / `failed to load driver: vc4` — the Pi 5's GPU driver doesn't support hardware-accelerated 3D rendering for Gazebo. It falls back to **software rendering** automatically, which works but runs slow (visible as reduced playback % in the sim window). This is just a Pi 5 hardware limitation, not something to fix.
+
+## Debugging log (chronological)
+
+1. **ARM64/AMD64 mismatch** — see Dockerfile note above (`osrf/ros:jazzy-desktop` → `ros:jazzy` + manual desktop install)
+2. **`ign` command not found** — `tortoisebot_gazebo`'s `ignition_sim.launch.py` called the old Ignition-era `ign gazebo` command, which doesn't exist under Jazzy's Gazebo Harmonic. Fixed by editing lines 112 & 118 in that launch file: `cmd=['ign', 'gazebo', ...]` → `cmd=['gz', 'sim', ...]`
+3. **Fix didn't take effect** — classic colcon gotcha: `colcon build` copies `src/` into `install/` by default, and `ros2 launch` runs the `install/` copy. Edits to source do nothing until rebuilt. Fixed by rebuilding with `colcon build --packages-select tortoisebot_gazebo --symlink-install`, which symlinks `install/` back to `src/` so future edits apply immediately
+4. **Missing dependencies during build** (`camera_info_manager`, `ydlidar_ros2_driver`) — installed directly via `apt`, or skipped with `--packages-skip` since they're physical-hardware-only and not needed for simulation
+5. **✅ First successful launch** — Gazebo rendered `nav2_test_world.sdf`, robot spawned (`Entity creation successful`), all sensor bridges connected (camera, ydlidar, odom, tf)
+6. **Intermittent X11 crash on a later run** — `qt.qpa.xcb: could not connect to display :0` crashed the Gazebo GUI (Qt fatal abort) despite working minutes earlier. Root cause: `xhost +local:root` grant reset after a Raspberry Pi Connect session change. Fix: re-run `xhost +local:root` on the host before each new launch if the desktop session has reconnected
+
+> **Housekeeping:** failed Gazebo GUI crashes leave large `core.*` dump files in `~/tortoise_ws/` (~150MB each). Clean up periodically: `rm -f ~/tortoise_ws/core.*`
 
 ## Status / TODO
 
 - [x] Fixed ARM64/AMD64 Docker image mismatch (switched to `ros:jazzy` base)
+- [x] Fixed `ign` → `gz sim` command in `ignition_sim.launch.py`
+- [x] Fixed stale `install/` copy by rebuilding with `--symlink-install`
 - [x] Workspace built, Gazebo simulation launches, robot spawns and drives via teleop
 - [ ] Run SLAM Toolbox against the simulated robot (next step)
 - [ ] Add persistent volume mount to the sim Docker run command (currently `--rm`, work is lost on exit)
+- [ ] Re-run `xhost +local:root` on host whenever the Raspberry Pi Connect session resets (recurring gotcha, not a one-time fix)
+- [ ] Periodically clean `~/tortoise_ws/core.*` crash dumps
 - [ ] Tune SLAM Toolbox params against manual joystick/teleop-driven mapping
 - [ ] Tune Nav2 costmap inflation
-- [ ] Validate `.xacro` in simulation before running on real hardware in the lab
-- [ ] Confirm how you're accessing the Pi 5 desktop (local monitor, SSH -X, or VNC) so GUI forwarding works
+- [ ] Validate `.xacro` (from `tortoisewithself` repo) in simulation before running on real hardware in the lab
 - [ ] Test ROS_DOMAIN_ID / multi-machine discovery between the two Pis on the lab network
