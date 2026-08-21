@@ -14,7 +14,7 @@ setup(
     install_requires=['setuptools'],
     zip_safe=True,
     maintainer='divyanshu',
-    maintainer_email='you@example.com',
+    maintainer_email='divyanshusharma190605.com',
     description='Voice-controlled teleop for tortoisebot via OpenAI Whisper + GPT intent matching',
     license='Apache-2.0',
     tests_require=['pytest'],
